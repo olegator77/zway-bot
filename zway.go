@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -98,17 +97,19 @@ func (zw *ZWay) Auth(name string, pass string) error {
 	authResp := ZWayAuthResp{}
 
 	err := zw.request(req, &authResp)
-	fmt.Println(authResp.Data.Sid)
+	log.Printf("Got ZWAYAuth token: %s", authResp.Data.Sid)
 	zw.zwaySess = authResp.Data.Sid
 
+	return err
+}
+
+func (zw *ZWay) StartPolling(t time.Duration) {
 	go func() {
 		for {
+			time.Sleep(t)
 			zway.Devices(true)
-			time.Sleep(time.Duration(30 * time.Second))
 		}
 	}()
-
-	return err
 }
 
 func (zw *ZWay) ControlRGB(dev string, r int, g int, b int) error {
@@ -196,6 +197,18 @@ func (zw *ZWay) Locations(forceReload bool) (ret []ZWayLocation, err error) {
 	}
 	zw.lock.Unlock()
 	return ret, nil
+}
+
+func (zw *ZWay) LocationTitle(id int) string {
+	zw.lock.Lock()
+	defer zw.lock.Unlock()
+	return zw.locations[id].Title
+}
+
+func (zw *ZWay) DeviceTitle(id string) string {
+	zw.lock.Lock()
+	defer zw.lock.Unlock()
+	return zw.devices[id].Metrics.Title
 }
 
 func (zw *ZWay) isDeviceOn(dev string) bool {

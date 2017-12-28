@@ -32,6 +32,7 @@ type CommandDataRGB struct {
 
 var commands = [...]CommandDef{
 
+	{"активируй", []string{"toggleButton"}, CommandOn, nil},
 	{"включи", []string{"*"}, CommandOn, nil},
 	{"зажги", []string{"*"}, CommandOn, nil},
 	{"погаси", []string{"*"}, CommandOff, nil},
@@ -75,7 +76,7 @@ func NewCmdProcessor() *CmdProcessor {
 	return &CmdProcessor{locations: make(map[int]CmdLocation), devices: make(map[string]CmdDevice), locNames: make(map[string]bool)}
 }
 
-func (cmd *CmdProcessor) AddDevice(id, title, devType string, location int) {
+func (cmd *CmdProcessor) AddDevice(id, title, devType string, location int) string {
 	titles := splitPhrase(title)
 
 	title = ""
@@ -86,25 +87,27 @@ func (cmd *CmdProcessor) AddDevice(id, title, devType string, location int) {
 	}
 
 	cmd.devices[id] = CmdDevice{title, devType, location}
+	return title
 }
 
-func (cmd *CmdProcessor) AddLocation(id int, title string) {
+func (cmd *CmdProcessor) AddLocation(id int, title string) string {
 	title = strings.Join(splitPhrase(title), " ")
 	cmd.locNames[title] = true
 
 	cmd.locations[id] = CmdLocation{title}
+	return title
 }
 
-func (cmd *CmdProcessor) ProcessPhrase(phrase string) (devID string, cmdPtr *CommandDef) {
+func (cmd *CmdProcessor) ProcessPhrase(phrase string) (devID string, locID int, cmdPtr *CommandDef) {
 
-	locID := cmd.lookupLocation(phrase)
+	locID = cmd.lookupLocation(phrase)
 
 	excludeDevs := make(map[string]bool)
 	devScore := 0
 	for {
 		devID, devScore = cmd.lookupDevice(phrase, locID, excludeDevs)
 		if devID == "" {
-			return "", nil
+			return "", 0, nil
 		}
 		excludeDevs[devID] = true
 		cmdPtr = cmd.lookupCommand(phrase, cmd.devices[devID].DevType)
@@ -114,14 +117,14 @@ func (cmd *CmdProcessor) ProcessPhrase(phrase string) (devID string, cmdPtr *Com
 	}
 
 	if devScore == 0 && cmdPtr == nil {
-		return "", nil
+		return "", 0, nil
 	}
 
 	cmd.lastCmdDevice = devID
 	cmd.lastCmdLocation = locID
 	cmd.lastCmdTime = time.Now()
 
-	return devID, cmdPtr
+	return devID, locID, cmdPtr
 }
 
 func (cmd *CmdProcessor) lookupDevice(phrase string, location int, excludeDevs map[string]bool) (string, int) {
