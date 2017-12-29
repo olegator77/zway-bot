@@ -3,11 +3,18 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
+)
+
+const (
+	maxDeviceLevel  = 99
+	minDeviceLevel  = 0
+	stepDeviceLevel = 10
 )
 
 type ZWayDeviceLevel float64
@@ -16,9 +23,9 @@ func (zwl *ZWayDeviceLevel) UnmarshalJSON(b []byte) (err error) {
 	str := string(b)
 	switch str {
 	case "\"on\"":
-		*zwl = 99
+		*zwl = maxDeviceLevel
 	case "", "\"off\"", "null":
-		*zwl = 0
+		*zwl = minDeviceLevel
 	default:
 		val, e := strconv.ParseFloat(str, 64)
 		err = e
@@ -97,9 +104,15 @@ func (zw *ZWay) Auth(name string, pass string) error {
 	authResp := ZWayAuthResp{}
 
 	err := zw.request(req, &authResp)
-	log.Printf("Got ZWAYAuth token: %s", authResp.Data.Sid)
-	zw.zwaySess = authResp.Data.Sid
 
+	if len(authResp.Data.Sid) == 0 {
+		err = fmt.Errorf("No token in answer")
+	}
+
+	if err == nil {
+		log.Printf("Got ZWAYAuth token: %s", authResp.Data.Sid)
+		zw.zwaySess = authResp.Data.Sid
+	}
 	return err
 }
 
@@ -107,7 +120,7 @@ func (zw *ZWay) StartPolling(t time.Duration) {
 	go func() {
 		for {
 			time.Sleep(t)
-			zway.Devices(true)
+			zw.Devices(true)
 		}
 	}()
 }
@@ -126,7 +139,7 @@ func (zw *ZWay) ControlDimmer(dev string, level int) error {
 }
 
 func (zw *ZWay) ControlOn(dev string) error {
-	zw.saveDeviceLevel(dev, 99)
+	zw.saveDeviceLevel(dev, maxDeviceLevel)
 	req, _ := http.NewRequest("GET", zw.baseURL+"/devices/"+dev+"/command/on", nil)
 	return zw.request(req, nil)
 }
@@ -139,11 +152,15 @@ func (zw *ZWay) ControlToggle(dev string) error {
 
 }
 func (zw *ZWay) ControlDimmerUp(dev string) error {
-	return zw.ControlDimmer(dev, zw.adjustDimmerVal(dev, +10))
+	return zw.ControlDimmer(dev, zw.adjustDimmerVal(dev, stepDeviceLevel))
 }
 
 func (zw *ZWay) ControlDimmerDown(dev string) error {
-	return zw.ControlDimmer(dev, zw.adjustDimmerVal(dev, -10))
+	return zw.ControlDimmer(dev, zw.adjustDimmerVal(dev, -stepDeviceLevel))
+}
+
+func (zw *ZWay) ControlDimmerMax(dev string) error {
+	return zw.ControlDimmer(dev, maxDeviceLevel)
 }
 
 func (zw *ZWay) ControlOff(dev string) error {
@@ -223,11 +240,11 @@ func (zw *ZWay) adjustDimmerVal(dev string, adjust int) int {
 	d := zw.devices[dev]
 	zw.lock.Unlock()
 	iVal := int(d.Metrics.Level) + adjust
-	if iVal < 0 {
-		iVal = 0
+	if iVal < minDeviceLevel {
+		iVal = minDeviceLevel
 	}
-	if iVal > 99 {
-		iVal = 99
+	if iVal > maxDeviceLevel {
+		iVal = maxDeviceLevel
 	}
 	return iVal
 }
@@ -246,7 +263,7 @@ func (zw *ZWay) request(req *http.Request, dest interface{}) error {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return err
 	}
 	defer resp.Body.Close()

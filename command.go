@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/kljensen/snowball"
 )
@@ -17,6 +18,7 @@ const (
 	CommandRGB
 	CommandDimmerUp
 	CommandDimmerDown
+	CommandDimmerMax
 )
 
 type CommandDef struct {
@@ -42,6 +44,9 @@ var commands = [...]CommandDef{
 	{"ярче", []string{"switchMultilevel"}, CommandDimmerUp, nil},
 	{"светлее", []string{"switchMultilevel"}, CommandDimmerUp, nil},
 	{"темнее", []string{"switchMultilevel"}, CommandDimmerDown, nil},
+	{"максимум", []string{"switchMultilevel"}, CommandDimmerMax, nil},
+	{"больше", []string{"switchMultilevel"}, CommandDimmerUp, nil},
+	{"меньше", []string{"switchMultilevel"}, CommandDimmerDown, nil},
 
 	{"красный", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{100, 0, 0}},
 	{"синий", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{0, 0, 100}},
@@ -55,25 +60,34 @@ var commands = [...]CommandDef{
 type CmdLocation struct {
 	Title string
 }
-
 type CmdDevice struct {
 	Title      string
 	DevType    string
 	IDLocation int
 }
 
-type CmdProcessor struct {
-	locations map[int]CmdLocation
-	devices   map[string]CmdDevice
-	locNames  map[string]bool
-
+type context struct {
 	lastCmdTime     time.Time
 	lastCmdLocation int
 	lastCmdDevice   string
+	defaultLocation int
+}
+
+type CmdProcessor struct {
+	locations map[int]CmdLocation
+	devices   map[string]CmdDevice
+	locNames  map[string]int
+
+	contexts map[string]*context
 }
 
 func NewCmdProcessor() *CmdProcessor {
-	return &CmdProcessor{locations: make(map[int]CmdLocation), devices: make(map[string]CmdDevice), locNames: make(map[string]bool)}
+	return &CmdProcessor{
+		locations: make(map[int]CmdLocation),
+		devices:   make(map[string]CmdDevice),
+		locNames:  make(map[string]int),
+		contexts:  make(map[string]*context),
+	}
 }
 
 func (cmd *CmdProcessor) AddDevice(id, title, devType string, location int) string {
@@ -92,20 +106,37 @@ func (cmd *CmdProcessor) AddDevice(id, title, devType string, location int) stri
 
 func (cmd *CmdProcessor) AddLocation(id int, title string) string {
 	title = strings.Join(splitPhrase(title), " ")
-	cmd.locNames[title] = true
+	cmd.locNames[title] = id
 
 	cmd.locations[id] = CmdLocation{title}
 	return title
 }
 
-func (cmd *CmdProcessor) ProcessPhrase(phrase string) (devID string, locID int, cmdPtr *CommandDef) {
+func (cmd *CmdProcessor) SetContextDefaultLocation(ctxName string, defaultLocTitle string) bool {
 
-	locID = cmd.lookupLocation(phrase)
+	defaultLocTitle = strings.Join(splitPhrase(defaultLocTitle), " ")
+	locID, found := cmd.locNames[defaultLocTitle]
+	if !found {
+		return false
+	}
+	cmd.contexts[ctxName] = &context{defaultLocation: locID}
+	return true
+}
+
+func (cmd *CmdProcessor) ProcessPhrase(phrase string, ctxName string) (devID string, locID int, cmdPtr *CommandDef) {
+
+	ctx, found := cmd.contexts[ctxName]
+	if !found {
+		ctx = &context{}
+		cmd.contexts[ctxName] = ctx
+	}
+
+	locID = cmd.lookupLocation(phrase, ctx)
 
 	excludeDevs := make(map[string]bool)
 	devScore := 0
 	for {
-		devID, devScore = cmd.lookupDevice(phrase, locID, excludeDevs)
+		devID, devScore = cmd.lookupDevice(phrase, locID, excludeDevs, ctx)
 		if devID == "" {
 			return "", 0, nil
 		}
@@ -120,14 +151,14 @@ func (cmd *CmdProcessor) ProcessPhrase(phrase string) (devID string, locID int, 
 		return "", 0, nil
 	}
 
-	cmd.lastCmdDevice = devID
-	cmd.lastCmdLocation = locID
-	cmd.lastCmdTime = time.Now()
+	ctx.lastCmdDevice = devID
+	ctx.lastCmdLocation = locID
+	ctx.lastCmdTime = time.Now()
 
 	return devID, locID, cmdPtr
 }
 
-func (cmd *CmdProcessor) lookupDevice(phrase string, location int, excludeDevs map[string]bool) (string, int) {
+func (cmd *CmdProcessor) lookupDevice(phrase string, location int, excludeDevs map[string]bool, ctx *context) (string, int) {
 
 	bestDevScore, bestDevID := 0, ""
 	for id, dev := range cmd.devices {
@@ -147,8 +178,8 @@ func (cmd *CmdProcessor) lookupDevice(phrase string, location int, excludeDevs m
 		}
 	}
 
-	if bestDevScore == 0 && time.Now().Sub(cmd.lastCmdTime) < time.Duration(60*time.Second) {
-		bestDevID = cmd.lastCmdDevice
+	if _, excluded := excludeDevs[ctx.lastCmdDevice]; !excluded && bestDevScore == 0 && time.Now().Sub(ctx.lastCmdTime) < time.Duration(60*time.Second) {
+		bestDevID = ctx.lastCmdDevice
 	}
 
 	if bestDevID == "" {
@@ -162,7 +193,7 @@ func (cmd *CmdProcessor) lookupDevice(phrase string, location int, excludeDevs m
 	return bestDevID, bestDevScore
 }
 
-func (cmd *CmdProcessor) lookupLocation(phrase string) int {
+func (cmd *CmdProcessor) lookupLocation(phrase string, ctx *context) int {
 
 	bestLocScore, bestLocID := 0, 0
 
@@ -176,9 +207,14 @@ func (cmd *CmdProcessor) lookupLocation(phrase string) int {
 		}
 	}
 
-	if bestLocScore == 0 && time.Now().Sub(cmd.lastCmdTime) < time.Duration(60*time.Second) {
-		bestLocID = cmd.lastCmdLocation
+	if bestLocScore == 0 {
+		if time.Now().Sub(ctx.lastCmdTime) < time.Duration(60*time.Second) {
+			bestLocID = ctx.lastCmdLocation
+		} else {
+			bestLocID = ctx.defaultLocation
+		}
 	}
+
 	if bestLocID == 0 {
 		log.Printf("Can't lookup location")
 	} else if bestLocScore != 0 {
@@ -229,7 +265,6 @@ func isDevTypeMatch(devType string, types []string) bool {
 		}
 	}
 	return false
-
 }
 
 func splitPhrase(phrase string) []string {
@@ -241,18 +276,20 @@ func splitPhrase(phrase string) []string {
 				r = 'е'
 			}
 			buf.WriteRune(unicode.ToLower(r))
+		} else {
+			buf.WriteRune(' ')
 		}
 	}
 
 	words := strings.Split(buf.String(), " ")
+	rwords := make([]string, 0, len(words))
 	for i := range words {
-		w, err := snowball.Stem(words[i], "russian", true)
-		if err == nil {
-			words[i] = w
+		word, err := snowball.Stem(words[i], "russian", true)
+		if err == nil && utf8.RuneCountInString(word) > 1 {
+			rwords = append(rwords, word)
 		}
 	}
-	//	log.Println(words)
-	return words
+	return rwords
 }
 
 func getTitleScore(phrase, title string) int {
