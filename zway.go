@@ -189,8 +189,10 @@ func (zw *ZWay) Devices(forceReload bool) (ret []ZWayDevice, err error) {
 				d.DeviceType == "switchBinary" ||
 				d.DeviceType == "thermostat") {
 			zw.devices[d.ID] = d
-			ret = append(ret, d)
 		}
+	}
+	for _, d := range zw.devices {
+		ret = append(ret, d)
 	}
 	zw.lock.Unlock()
 
@@ -210,8 +212,11 @@ func (zw *ZWay) Locations(forceReload bool) (ret []ZWayLocation, err error) {
 	zw.lock.Lock()
 	for _, loc := range locations.Data {
 		zw.locations[loc.ID] = loc
+	}
+	for _, loc := range zw.locations {
 		ret = append(ret, loc)
 	}
+
 	zw.lock.Unlock()
 	return ret, nil
 }

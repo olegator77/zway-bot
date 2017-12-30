@@ -33,8 +33,23 @@ type CommandDataRGB struct {
 }
 
 var commands = [...]CommandDef{
+	{"run", []string{"toggleButton"}, CommandOn, nil},
+	{"on", []string{"*"}, CommandOn, nil},
+	{"off", []string{"*"}, CommandOff, nil},
 
-	{"активируй", []string{"toggleButton"}, CommandOn, nil},
+	{"ligher", []string{"switchMultilevel"}, CommandDimmerUp, nil},
+	{"darker", []string{"switchMultilevel"}, CommandDimmerDown, nil},
+	{"maximum", []string{"switchMultilevel"}, CommandDimmerMax, nil},
+
+	{"red", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{100, 0, 0}},
+	{"dark blue", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{0, 0, 100}},
+	{"green", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{0, 100, 0}},
+	{"blue", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{0, 100, 100}},
+	{"white", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{100, 100, 100}},
+	{"yellow", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{100, 100, 0}},
+	{"violet", []string{"switchRGBW"}, CommandRGB, CommandDataRGB{100, 0, 100}},
+
+	{"запуск", []string{"toggleButton"}, CommandOn, nil},
 	{"включи", []string{"*"}, CommandOn, nil},
 	{"зажги", []string{"*"}, CommandOn, nil},
 	{"погаси", []string{"*"}, CommandOff, nil},
@@ -67,10 +82,14 @@ type CmdDevice struct {
 }
 
 type context struct {
-	lastCmdTime     time.Time
-	lastCmdLocation int
-	lastCmdDevice   string
-	defaultLocation int
+	lastCmdTime      time.Time
+	lastCmdLocations []int
+	lastCmdDevices   []string
+	defaultLocation  int
+}
+
+func (ctx *context) isExpired() bool {
+	return time.Now().Sub(ctx.lastCmdTime) > time.Duration(60*time.Second)
 }
 
 type CmdProcessor struct {
@@ -105,6 +124,10 @@ func (cmd *CmdProcessor) AddDevice(id, title, devType string, location int) stri
 }
 
 func (cmd *CmdProcessor) AddLocation(id int, title string) string {
+	if id == 0 {
+		title = "везде"
+	}
+
 	title = strings.Join(splitPhrase(title), " ")
 	cmd.locNames[title] = id
 
@@ -123,7 +146,7 @@ func (cmd *CmdProcessor) SetContextDefaultLocation(ctxName string, defaultLocTit
 	return true
 }
 
-func (cmd *CmdProcessor) ProcessPhrase(phrase string, ctxName string) (devID string, locID int, cmdPtr *CommandDef) {
+func (cmd *CmdProcessor) ProcessPhrase(phrase string, ctxName string) (devIDs []string, locIDs []int, cmdPtr *CommandDef) {
 
 	ctx, found := cmd.contexts[ctxName]
 	if !found {
@@ -131,99 +154,143 @@ func (cmd *CmdProcessor) ProcessPhrase(phrase string, ctxName string) (devID str
 		cmd.contexts[ctxName] = ctx
 	}
 
-	locID = cmd.lookupLocation(phrase, ctx)
+	locIDs = cmd.lookupLocation(phrase, ctx)
 
 	excludeDevs := make(map[string]bool)
 	devScore := 0
 	for {
-		devID, devScore = cmd.lookupDevice(phrase, locID, excludeDevs, ctx)
-		if devID == "" {
-			return "", 0, nil
+		devIDs, devScore = cmd.lookupDevice(phrase, locIDs, excludeDevs, ctx)
+		if len(devIDs) == 0 {
+			return nil, nil, nil
 		}
-		excludeDevs[devID] = true
-		cmdPtr = cmd.lookupCommand(phrase, cmd.devices[devID].DevType)
+		cmdPtr = cmd.lookupCommand(phrase, cmd.devices[devIDs[0]].DevType)
 		if cmdPtr != nil || cmd.lookupCommand(phrase, "*") == nil {
 			break
+		}
+		for _, devID := range devIDs {
+			excludeDevs[devID] = true
 		}
 	}
 
 	if devScore == 0 && cmdPtr == nil {
-		return "", 0, nil
+		return nil, nil, nil
 	}
 
-	ctx.lastCmdDevice = devID
-	ctx.lastCmdLocation = locID
+	ctx.lastCmdDevices = devIDs
+	ctx.lastCmdLocations = locIDs
 	ctx.lastCmdTime = time.Now()
 
-	return devID, locID, cmdPtr
+	return devIDs, locIDs, cmdPtr
 }
 
-func (cmd *CmdProcessor) lookupDevice(phrase string, location int, excludeDevs map[string]bool, ctx *context) (string, int) {
+func (cmd *CmdProcessor) lookupDevice(phrase string, locations []int, excludeDevs map[string]bool, ctx *context) ([]string, int) {
 
-	bestDevScore, bestDevID := 0, ""
+	bestDevScore, bestDevIDs := 0, []string{}
 	for id, dev := range cmd.devices {
+
+		// skip device, if it was already exclude on previous iterations
 		if _, excluded := excludeDevs[id]; excluded {
 			continue
 		}
 
+		// get phrase score
 		score := getTitleScore(phrase, dev.Title)
 
-		if location != 0 && dev.IDLocation != location {
-			score--
+		// check if device doesn't match location decrease score
+		if len(locations) > 0 && locations[0] != 0 {
+			locMatch := false
+			for _, loc := range locations {
+				locMatch = locMatch || (dev.IDLocation == loc)
+			}
+			if !locMatch {
+				score--
+			}
 		}
 
 		if score > bestDevScore {
+			// Found device with better score - reset previous result
 			bestDevScore = score
-			bestDevID = id
+			bestDevIDs = bestDevIDs[:0]
+		}
+
+		if score != 0 && score == bestDevScore {
+			// Device has current maximum score - append to result
+			bestDevIDs = append(bestDevIDs, id)
 		}
 	}
 
-	if _, excluded := excludeDevs[ctx.lastCmdDevice]; !excluded && bestDevScore == 0 && time.Now().Sub(ctx.lastCmdTime) < time.Duration(60*time.Second) {
-		bestDevID = ctx.lastCmdDevice
+	if len(bestDevIDs) == 0 && !ctx.isExpired() {
+		// No devices found. Try fallback to device from context
+		for _, devID := range ctx.lastCmdDevices {
+			if _, excluded := excludeDevs[devID]; !excluded {
+				bestDevIDs = append(bestDevIDs, devID)
+			}
+		}
 	}
 
-	if bestDevID == "" {
+	if len(bestDevIDs) == 0 {
 		log.Printf("Can't lookup device")
-	} else if bestDevScore != 0 {
-		log.Printf("Looked up device '%s', score=%d", cmd.devices[bestDevID].Title, bestDevScore)
 	} else {
-		log.Printf("Using device '%s' from last context", cmd.devices[bestDevID].Title)
+		devNames := ""
+		for i, devID := range bestDevIDs {
+			if i != 0 {
+				devNames += ","
+			}
+			devNames += cmd.devices[devID].Title
+		}
+		if bestDevScore != 0 {
+			log.Printf("Looked up '%s', score=%d", devNames, bestDevScore)
+		} else {
+			log.Printf("Using '%s' from last context", devNames)
+		}
 	}
 
-	return bestDevID, bestDevScore
+	return bestDevIDs, bestDevScore
 }
 
-func (cmd *CmdProcessor) lookupLocation(phrase string, ctx *context) int {
+func (cmd *CmdProcessor) lookupLocation(phrase string, ctx *context) []int {
 
-	bestLocScore, bestLocID := 0, 0
+	bestLocScore, bestLocIDs := 0, []int{}
 
 	for id, loc := range cmd.locations {
 
 		score := getTitleScore(phrase, loc.Title)
 
-		if score > bestLocScore && cmd != nil {
+		if score > bestLocScore {
 			bestLocScore = score
-			bestLocID = id
+			bestLocIDs = bestLocIDs[:0]
+		}
+		if score != 0 && score == bestLocScore {
+			bestLocIDs = append(bestLocIDs, id)
 		}
 	}
 
 	if bestLocScore == 0 {
-		if time.Now().Sub(ctx.lastCmdTime) < time.Duration(60*time.Second) {
-			bestLocID = ctx.lastCmdLocation
+		if !ctx.isExpired() {
+			bestLocIDs = ctx.lastCmdLocations
 		} else {
-			bestLocID = ctx.defaultLocation
+			bestLocIDs = []int{ctx.defaultLocation}
 		}
 	}
 
-	if bestLocID == 0 {
+	if len(bestLocIDs) == 0 {
 		log.Printf("Can't lookup location")
-	} else if bestLocScore != 0 {
-		log.Printf("Locked up location '%s', score=%d", cmd.locations[bestLocID].Title, bestLocScore)
 	} else {
-		log.Printf("Using location '%s' from last context", cmd.locations[bestLocID].Title)
-	}
+		locNames := ""
+		for i, locID := range bestLocIDs {
+			if i != 0 {
+				locNames += ","
+			}
+			locNames += cmd.locations[locID].Title
+		}
 
-	return bestLocID
+		if bestLocScore != 0 {
+			log.Printf("Locked up location '%s', score=%d", locNames, bestLocScore)
+		} else {
+			log.Printf("Using location '%s' from last context", locNames)
+		}
+	}
+	return bestLocIDs
 }
 
 func (cmd *CmdProcessor) lookupCommand(command, devType string) *CommandDef {
