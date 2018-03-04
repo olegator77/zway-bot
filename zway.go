@@ -24,7 +24,7 @@ func (zwl *ZWayDeviceLevel) UnmarshalJSON(b []byte) (err error) {
 	switch str {
 	case "\"on\"":
 		*zwl = maxDeviceLevel
-	case "", "\"off\"", "null":
+	case "", "\"off\"", "null","\"\"":
 		*zwl = minDeviceLevel
 	default:
 		val, e := strconv.ParseFloat(str, 64)
